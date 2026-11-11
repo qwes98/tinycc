@@ -24,7 +24,9 @@ export type ToolRegistry = Readonly<Record<string, Tool>>;
  * Each call validates first, runs once, then formats only a successful result.
  * Failures propagate as promise rejections for the caller to report.
  */
-export function defineTool<Args, Result>(definition: ToolDefinition<Args, Result>): Tool {
+export function defineTool<Args, Result>(
+  definition: ToolDefinition<Args, Result>,
+): Tool {
   return {
     async execute(input) {
       const args = definition.parse(input);
@@ -84,9 +86,15 @@ export async function executeTool(
   call: unknown,
   tools: ToolRegistry = defaultTools,
 ): Promise<string> {
-  if (!isRecord(call) || call.type !== "tool_call" || typeof call.name !== "string"
-    || !Object.hasOwn(call, "arguments")) {
-    throw new Error("Invalid tool call: expected { type: 'tool_call', name: string, arguments }");
+  if (
+    !isRecord(call) ||
+    call.type !== "tool_call" ||
+    typeof call.name !== "string" ||
+    !Object.hasOwn(call, "arguments")
+  ) {
+    throw new Error(
+      "Invalid tool call: expected { type: 'tool_call', name: string, arguments }",
+    );
   }
   // Prototype properties such as toString are not registered tools.
   if (!Object.hasOwn(tools, call.name)) {

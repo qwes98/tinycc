@@ -10,7 +10,9 @@ export type Message =
  * Accepts request history and resolves to final text or a tool request; failures reject.
  * History may be extended after resolution. Implementations must copy it to retain a snapshot.
  */
-export type Model = (messages: readonly Message[]) => Promise<string | ToolCall>;
+export type Model = (
+  messages: readonly Message[],
+) => Promise<string | ToolCall>;
 
 /**
  * Returns deterministic requests without network access. File results drive subsequent replies.
@@ -23,11 +25,19 @@ export const fakeModel: Model = async (messages) => {
   const results = messages.filter((message) => message.role === "tool");
   if (prompt === "read" || prompt === "inspect") {
     if (results.length === 0) {
-      return { type: "tool_call", name: "read_file", arguments: { path: "fixtures/project.txt" } };
+      return {
+        type: "tool_call",
+        name: "read_file",
+        arguments: { path: "fixtures/project.txt" },
+      };
     }
     if (prompt === "read") return results[0]!.content;
     if (results.length === 1) {
-      return { type: "tool_call", name: "read_file", arguments: { path: "fixtures/notes.txt" } };
+      return {
+        type: "tool_call",
+        name: "read_file",
+        arguments: { path: "fixtures/notes.txt" },
+      };
     }
     return "Inspected two files";
   }

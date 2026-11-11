@@ -10,10 +10,17 @@
     "start": "node src/cli.ts",
     "test": "node --test \"test/**/*.test.ts\"",
     "typecheck": "tsc --noEmit",
-    "check": "npm run typecheck && npm test"
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "oxlint --deny-warnings src test",
+    "lint:fix": "npm run lint -- --fix",
+    "check": "npm run format:check && npm run lint && npm run typecheck && npm test"
   },
   "devDependencies": {
     "@types/node": "^24.19.2",
+    "oxlint": "1.93.0",
+    "oxlint-tsgolint": "7.0.2006",
+    "prettier": "3.10.0",
     "typescript": "^7.0.2"
   }
 }

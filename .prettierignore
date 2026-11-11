@@ -1,0 +1,10 @@
+# Keep local files and fixture contents outside repository-wide formatting.
+spec/
+AGENTS.md
+.agents/
+fixtures/
+node_modules/
+coverage/
+package-lock.json
+.env
+.env.*

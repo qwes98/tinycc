@@ -37,7 +37,9 @@ export function createSession(model: Model, write: (text: string) => void) {
     if (line === "") return "continue";
     if (line === "exit") return "exit";
     if (line === "help") {
-      write("hello | read | inspect | stats | batch <1..20> | fail | exit\nOther input is sent to the fake model.\nUnavailable: command, command-error");
+      write(
+        "hello | read | inspect | stats | batch <1..20> | fail | exit\nOther input is sent to the fake model.\nUnavailable: command, command-error",
+      );
       return "continue";
     }
     if (line === "stats") {
@@ -53,7 +55,12 @@ export function createSession(model: Model, write: (text: string) => void) {
       if (line === "batch" || line.startsWith("batch ")) {
         const parts = line.split(/\s+/);
         const count = Number(parts[1]);
-        if (parts.length !== 2 || !Number.isInteger(count) || count < 1 || count > 20) {
+        if (
+          parts.length !== 2 ||
+          !Number.isInteger(count) ||
+          count < 1 ||
+          count > 20
+        ) {
           throw new Error("Usage: batch <1..20>");
         }
         // Await each reply to preserve output order. A failure stops the remaining calls.
