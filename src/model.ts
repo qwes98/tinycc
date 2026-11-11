@@ -1,18 +1,35 @@
 import type { ToolCall } from "./tools.ts";
 
-/**
- * Accepts one prompt and resolves to reply text or one tool request, or rejects on failure.
- * Sessions depend on this function signature so model implementations can change independently.
- */
-export type Model = (prompt: string) => Promise<string | ToolCall>;
+/** Ordered events for one request. Tool results preserve the complete tool output. */
+export type Message =
+  | { role: "user"; content: string }
+  | { role: "assistant"; content: ToolCall }
+  | { role: "tool"; content: string };
 
 /**
- * Returns fixed responses without network requests: "hello" resolves to "tinycc ready",
- * "read" requests a fixture file, "fail" rejects, and other prompts resolve to text.
+ * Accepts request history and resolves to final text or a tool request; failures reject.
+ * History may be extended after resolution. Implementations must copy it to retain a snapshot.
  */
-export const fakeModel: Model = async (prompt) => {
-  if (prompt === "read") {
-    return { type: "tool_call", name: "read_file", arguments: { path: "fixtures/project.txt" } };
+export type Model = (messages: readonly Message[]) => Promise<string | ToolCall>;
+
+/**
+ * Returns deterministic requests without network access. File results drive subsequent replies.
+ * "inspect" requests two files sequentially; "read" returns the supplied file result.
+ */
+export const fakeModel: Model = async (messages) => {
+  const first = messages[0];
+  if (first?.role !== "user") throw new Error("Expected a user message");
+  const prompt = first.content;
+  const results = messages.filter((message) => message.role === "tool");
+  if (prompt === "read" || prompt === "inspect") {
+    if (results.length === 0) {
+      return { type: "tool_call", name: "read_file", arguments: { path: "fixtures/project.txt" } };
+    }
+    if (prompt === "read") return results[0]!.content;
+    if (results.length === 1) {
+      return { type: "tool_call", name: "read_file", arguments: { path: "fixtures/notes.txt" } };
+    }
+    return "Inspected two files";
   }
   if (prompt === "fail") {
     throw new Error("Fake model connection failed");

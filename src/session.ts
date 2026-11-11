@@ -1,32 +1,28 @@
 import type { Model } from "./model.ts";
-import { executeTool } from "./tools.ts";
+import { runAgent } from "./agent.ts";
 
 type Outcome = "continue" | "exit" | "error";
 
-const unavailableCommands = new Set(["inspect", "command", "command-error"]);
+const unavailableCommands = new Set(["command", "command-error"]);
 
 /**
  * Creates a command handler with its own model call counter.
- * @param model Async function that turns a prompt into text or one tool request.
+ * @param model Async function that turns request history into text or one tool request.
  * @param write Receives each reply or status message; the caller controls where it goes.
  * @returns An execute function that shares this session's counter across calls.
  */
 export function createSession(model: Model, write: (text: string) => void) {
   let modelCalls = 0;
 
-  /** Writes text or the result of one tool request; failures propagate to execute. */
+  /** Runs one isolated request and displays final text; failures propagate to execute. */
   async function ask(prompt: string) {
-    // Count attempts before awaiting, so rejected calls also appear in stats.
-    modelCalls += 1;
-    const reply = await model(prompt);
-    if (typeof reply === "string") {
-      write(reply);
-    } else {
-      // Display one result directly. Returning results to the model requires a conversation loop.
-      const result = await executeTool(reply);
-      // The output callback supplies the final newline when displaying file contents.
-      write(result.endsWith("\n") ? result.slice(0, -1) : result);
-    }
+    const result = await runAgent(prompt, async (messages) => {
+      // Count every attempted call, including later turns and rejected calls.
+      modelCalls += 1;
+      return model(messages);
+    });
+    // Remove one display newline only after the model has consumed unmodified tool results.
+    write(result.endsWith("\n") ? result.slice(0, -1) : result);
   }
 
   /**
@@ -41,7 +37,7 @@ export function createSession(model: Model, write: (text: string) => void) {
     if (line === "") return "continue";
     if (line === "exit") return "exit";
     if (line === "help") {
-      write("hello | read | stats | batch <1..20> | fail | exit\nOther input is sent to the fake model.\nUnavailable: inspect, command, command-error");
+      write("hello | read | inspect | stats | batch <1..20> | fail | exit\nOther input is sent to the fake model.\nUnavailable: command, command-error");
       return "continue";
     }
     if (line === "stats") {
