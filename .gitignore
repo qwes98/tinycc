@@ -1,0 +1,11 @@
+node_modules/
+.env
+.env.*
+!.env.example
+coverage/
+*.tsbuildinfo
+
+# Local configuration and private files
+/spec/
+AGENTS.md
+.agents/
