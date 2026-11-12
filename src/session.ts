@@ -3,8 +3,6 @@ import { runAgent } from "./agent.ts";
 
 type Outcome = "continue" | "exit" | "error";
 
-const unavailableCommands = new Set(["command", "command-error"]);
-
 /**
  * Creates a command handler with its own model call counter.
  * @param model Async function that turns request history into text or one tool request.
@@ -38,7 +36,7 @@ export function createSession(model: Model, write: (text: string) => void) {
     if (line === "exit") return "exit";
     if (line === "help") {
       write(
-        "hello | read | inspect | stats | batch <1..20> | fail | exit\nOther input is sent to the fake model.\nUnavailable: command, command-error",
+        "hello | read | inspect | command | command-error | stats | batch <1..20> | fail | exit\nOther input is sent to the fake model.",
       );
       return "continue";
     }
@@ -46,11 +44,6 @@ export function createSession(model: Model, write: (text: string) => void) {
       write(`model_calls=${modelCalls}`);
       return "continue";
     }
-    if (unavailableCommands.has(line)) {
-      write(`Command not available: ${line}`);
-      return "continue";
-    }
-
     try {
       if (line === "batch" || line.startsWith("batch ")) {
         const parts = line.split(/\s+/);

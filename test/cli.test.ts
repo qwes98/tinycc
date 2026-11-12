@@ -5,6 +5,22 @@ import { fileURLToPath } from "node:url";
 
 // The Node test runner reports failures; registration Promises are intentionally not awaited.
 
+void test("command demos print model replies and exit successfully for both process statuses", () => {
+  const cli = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
+  for (const [demo, output] of [
+    ["command", "42\n"],
+    ["command-error", "Command failed: 7\n"],
+  ]) {
+    const result = spawnSync(process.execPath, [cli, "--demo", demo], {
+      encoding: "utf8",
+      timeout: 15_000,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, output);
+    assert.equal(result.stderr, "");
+  }
+});
+
 void test("inspect demo prints only the final response and exits successfully", () => {
   const cli = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
   const result = spawnSync(process.execPath, [cli, "--demo", "inspect"], {

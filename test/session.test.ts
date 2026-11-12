@@ -12,6 +12,21 @@ void test("hello prints the fixed readiness response", async () => {
   assert.deepEqual(output, ["tinycc ready"]);
 });
 
+void test("nonzero command exits return to the model and the session continues", async () => {
+  const output: string[] = [];
+  const session = createSession(fakeModel, (text) => output.push(text));
+  assert.equal(await session.execute("command-error"), "continue");
+  await session.execute("stats");
+  assert.equal(await session.execute("command"), "continue");
+  await session.execute("stats");
+  assert.deepEqual(output, [
+    "Command failed: 7",
+    "model_calls=2",
+    "42",
+    "model_calls=4",
+  ]);
+});
+
 void test("model call counts match an independent call log", async () => {
   // Record actual invocations independently of the counter reported by stats.
   const calls: string[] = [];
@@ -30,9 +45,8 @@ void test("model call counts match an independent call log", async () => {
     await session.execute(command);
   }
   await session.execute("stats");
-  assert.deepEqual(calls, ["hello", "hello", "hello", "hello"]);
+  assert.deepEqual(calls, ["hello", "command", "hello", "hello", "hello"]);
   assert.equal(output.at(-1), `model_calls=${calls.length}`);
-  assert.ok(output.includes("Command not available: command"));
 });
 
 void test("a file request returns its result to the model before display", async () => {

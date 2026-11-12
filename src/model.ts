@@ -17,12 +17,29 @@ export type Model = (
 /**
  * Returns deterministic requests without network access. File results drive subsequent replies.
  * "inspect" requests two files sequentially; "read" returns the supplied file result.
+ * "command" and "command-error" request one command and return its supplied result unchanged.
  */
 export const fakeModel: Model = async (messages) => {
   const first = messages[0];
   if (first?.role !== "user") throw new Error("Expected a user message");
   const prompt = first.content;
   const results = messages.filter((message) => message.role === "tool");
+  if (prompt === "command" || prompt === "command-error") {
+    if (results.length > 0) return results[0]!.content;
+    return {
+      type: "tool_call",
+      name: "run_command",
+      arguments: {
+        command: process.execPath,
+        args: [
+          "-e",
+          prompt === "command"
+            ? 'process.stdout.write("42\\n")'
+            : "process.exit(7)",
+        ],
+      },
+    };
+  }
   if (prompt === "read" || prompt === "inspect") {
     if (results.length === 0) {
       return {

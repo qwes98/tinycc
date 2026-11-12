@@ -1,0 +1,379 @@
+import assert from "node:assert/strict";
+import childProcess, { spawnSync, type ChildProcess } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+import {
+  formatCommandResult,
+  runCommand,
+  type CommandResult,
+} from "../../src/tools/command.ts";
+import { defineTool, executeTool } from "../../src/tools.ts";
+import { runAgent } from "../../src/agent.ts";
+
+// The Node test runner reports failures; registration Promises are intentionally not awaited.
+
+void test("command results preserve successful output and describe nonzero exits", () => {
+  assert.equal(
+    formatCommandResult({
+      kind: "exited",
+      stdout: "42\n",
+      stderr: "warning\n",
+      exitCode: 0,
+    }),
+    "42\n",
+  );
+  assert.equal(
+    formatCommandResult({
+      kind: "exited",
+      stdout: "",
+      stderr: "",
+      exitCode: 0,
+    }),
+    "",
+  );
+  assert.equal(
+    formatCommandResult({
+      kind: "exited",
+      stdout: "",
+      stderr: "",
+      exitCode: 7,
+    }),
+    "Command failed: 7",
+  );
+  assert.equal(
+    formatCommandResult({
+      kind: "exited",
+      stdout: "",
+      stderr: "boom\n",
+      exitCode: 1,
+    }),
+    "Command failed: 1\nboom\n",
+  );
+  assert.equal(
+    formatCommandResult({
+      kind: "exited",
+      stdout: "partial\n",
+      stderr: "",
+      exitCode: 3,
+    }),
+    "Command failed: 3\npartial\n",
+  );
+  assert.equal(
+    formatCommandResult({
+      kind: "exited",
+      stdout: "partial\n",
+      stderr: "reason\n",
+      exitCode: 2,
+    }),
+    "Command failed: 2\npartial\nreason\n",
+  );
+});
+
+void test("command failure text identifies the cause and warns about partial work", () => {
+  const cases: [CommandResult, string][] = [
+    [
+      {
+        kind: "launch_error",
+        code: "ENOENT",
+        message: "spawn missing ENOENT",
+        stdout: "",
+        stderr: "",
+      },
+      "Command could not start (ENOENT): spawn missing ENOENT",
+    ],
+    [
+      { kind: "timeout", timeoutMs: 300, stdout: "partial\n", stderr: "" },
+      "Command timed out after 300 ms. Partial work may have occurred; inspect state before retrying.\npartial\n",
+    ],
+    [
+      { kind: "output_limit", maxBufferBytes: 1024, stdout: "", stderr: "" },
+      "Command output exceeded 1024 bytes per stream. Output is truncated; partial work may have occurred. Inspect state before retrying.",
+    ],
+    [
+      { kind: "signal", signal: "SIGKILL", stdout: "", stderr: "" },
+      "Command terminated by signal: SIGKILL. Partial work may have occurred; inspect state before retrying.",
+    ],
+  ];
+  for (const [result, expected] of cases) {
+    assert.equal(formatCommandResult(result), expected);
+  }
+});
+
+void test("captured command results match direct process execution", async () => {
+  // A synchronous subprocess provides an independent oracle for output and status.
+  for (const exitCode of [0, 7]) {
+    const args = [
+      "-e",
+      `process.stdout.write("out\\n"); process.stderr.write("err\\n"); process.exitCode = ${exitCode}`,
+    ];
+    const expected = spawnSync(process.execPath, args, {
+      encoding: "utf8",
+      timeout: 5_000,
+    });
+    assert.equal(expected.error, undefined);
+    assert.equal(expected.signal, null);
+    assert.equal(expected.status, exitCode);
+    assert.deepEqual(await runCommand(process.execPath, args), {
+      kind: "exited",
+      stdout: expected.stdout,
+      stderr: expected.stderr,
+      exitCode: expected.status,
+    });
+  }
+});
+
+void test("commands receive literal arguments, the current directory, and closed stdin", async () => {
+  const literal = 'spaces ; $(echo unexpected) "quoted"';
+  const result = await runCommand(process.execPath, [
+    "-e",
+    'const fs = require("node:fs"); process.stdout.write(JSON.stringify([process.argv[1], process.cwd(), fs.readFileSync(0, "utf8")]));',
+    literal,
+  ]);
+  assert.equal(result.kind, "exited");
+  assert.ok(result.kind === "exited");
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(JSON.parse(result.stdout), [literal, process.cwd(), ""]);
+});
+
+void test("launch failures resolve and invalid command arguments fail before execution", async () => {
+  const result = await runCommand("/tinycc-missing-executable/run", []);
+  assert.equal(result.kind, "launch_error");
+  assert.ok(result.kind === "launch_error");
+  assert.equal(result.code, "ENOENT");
+  assert.match(result.message, /ENOENT/);
+  assert.equal(result.stdout, "");
+  assert.equal(result.stderr, "");
+  for (const args of [
+    null,
+    { command: "", args: [] },
+    { command: process.execPath, args: [1] },
+    { command: process.execPath },
+  ]) {
+    await assert.rejects(
+      executeTool({ type: "tool_call", name: "run_command", arguments: args }),
+      /Invalid tool arguments/,
+    );
+  }
+});
+
+void test("command dispatch returns formatted process output", async () => {
+  assert.equal(
+    await executeTool({
+      type: "tool_call",
+      name: "run_command",
+      arguments: {
+        command: process.execPath,
+        args: ["-e", 'process.stdout.write("42\\n")'],
+      },
+    }),
+    "42\n",
+  );
+});
+
+void test(
+  "permission and invalid parent path failures resolve as launch failures",
+  {
+    skip: process.platform === "win32",
+  },
+  async () => {
+    // Use a local temporary filesystem so shared-folder permission emulation cannot mask EACCES.
+    const directory = await mkdtemp(join(tmpdir(), "tinycc-command-"));
+    try {
+      const executable = join(directory, "no-execute");
+      await writeFile(executable, "#!/bin/sh\nexit 0\n", { mode: 0o600 });
+      const result = await runCommand(executable, []);
+      assert.equal(result.kind, "launch_error");
+      assert.ok(result.kind === "launch_error");
+      assert.equal(result.code, "EACCES");
+      assert.equal(result.stdout, "");
+      assert.equal(result.stderr, "");
+      // A regular file cannot be a path's parent directory; Node may throw ENOTDIR synchronously.
+      const invalidParent = await runCommand(join(executable, "child"), []);
+      assert.equal(invalidParent.kind, "launch_error");
+      assert.ok(invalidParent.kind === "launch_error");
+      assert.equal(invalidParent.code, "ENOTDIR");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+void test(
+  "synchronous OS spawn failures resolve with their original codes",
+  {
+    skip: process.platform !== "linux",
+  },
+  async () => {
+    // Linux limits individual argument and path lengths. spawnSync independently
+    // confirms each OS error; these values are valid JS strings, not malformed host arguments.
+    const cases: [string, string[], string][] = [
+      [process.execPath, ["x".repeat(1024 * 1024)], "E2BIG"],
+      // Avoid shared-folder path handling, which can translate long-path errors into EIO.
+      [join(tmpdir(), "x".repeat(8192)), [], "ENAMETOOLONG"],
+    ];
+    for (const [command, args, code] of cases) {
+      const direct = spawnSync(command, args);
+      assert.equal(
+        (direct.error as NodeJS.ErrnoException | undefined)?.code,
+        code,
+      );
+      const result = await runCommand(command, args);
+      assert.equal(result.kind, "launch_error");
+      assert.ok(result.kind === "launch_error");
+      assert.equal(result.code, code);
+      assert.equal(result.stdout, "");
+      assert.equal(result.stderr, "");
+    }
+  },
+);
+
+void test("unexpected errors after spawn reject regardless of code prefix", async (context) => {
+  const originalExecFile = childProcess.execFile;
+  for (const code of ["EIO", "ERR_SYNTHETIC_FAILURE"]) {
+    const failure = Object.assign(
+      new Error("Injected child error after spawn"),
+      { code },
+    );
+    let child: ChildProcess | undefined;
+    let closed: Promise<unknown> | undefined;
+    // Keep Node's real callback/error handling. Inject only the child error so the
+    // test checks error propagation independently of our classification implementation.
+    const replacement = context.mock.method(
+      childProcess,
+      "execFile",
+      (...args: Parameters<typeof originalExecFile>) => {
+        const launched = originalExecFile(...args);
+        child = launched;
+        // events.once would reject on our injected error; close is a separate cleanup signal.
+        closed = new Promise<void>((resolve) =>
+          launched.once("close", () => resolve()),
+        );
+        launched.once("spawn", () => {
+          setImmediate(() => launched.emit("error", failure));
+        });
+        return launched;
+      },
+    );
+    syncBuiltinESMExports();
+    try {
+      await assert.rejects(
+        runCommand(process.execPath, ["-e", "setInterval(() => {}, 1000)"]),
+        (error) => error === failure,
+      );
+    } finally {
+      replacement.mock.restore();
+      syncBuiltinESMExports();
+      child?.kill("SIGKILL");
+      await closed;
+    }
+  }
+});
+
+void test("signals and output overflow resolve with distinct outcomes and captured output", async () => {
+  const signaled = await runCommand(process.execPath, [
+    "-e",
+    'require("node:fs").writeSync(1, "partial\\n"); process.kill(process.pid, "SIGKILL")',
+  ]);
+  assert.deepEqual(signaled, {
+    kind: "signal",
+    signal: "SIGKILL",
+    stdout: "partial\n",
+    stderr: "",
+  });
+  const overflow = await runCommand(
+    process.execPath,
+    ["-e", 'process.stdout.write("x".repeat(8192))'],
+    { maxBufferBytes: 1024 },
+  );
+  assert.equal(overflow.kind, "output_limit");
+  assert.ok(overflow.kind === "output_limit");
+  assert.equal(overflow.maxBufferBytes, 1024);
+  assert.equal(overflow.stdout, "x".repeat(1024));
+});
+
+void test("timeouts preserve partial output and remain distinct from external signals", async () => {
+  // A short host-only deadline checks both SIGTERM handlers without slowing normal CLI use.
+  for (const handler of ["() => {}", "() => process.exit(0)"]) {
+    const result = await runCommand(
+      process.execPath,
+      [
+        "-e",
+        `process.on("SIGTERM", ${handler}); require("node:fs").writeSync(1, "partial\\n"); setInterval(() => {}, 1000);`,
+      ],
+      { timeoutMs: 300 },
+    );
+    assert.deepEqual(result, {
+      kind: "timeout",
+      timeoutMs: 300,
+      stdout: "partial\n",
+      stderr: "",
+    });
+  }
+});
+
+void test("invalid host options and invalid executable values still reject", async () => {
+  await assert.rejects(
+    runCommand(process.execPath, [], { timeoutMs: 0 }),
+    RangeError,
+  );
+  await assert.rejects(runCommand("bad\0executable", []), {
+    code: "ERR_INVALID_ARG_VALUE",
+  });
+});
+
+void test("the model receives a launch failure and can run a different command", async () => {
+  const tools = {
+    run_command: defineTool({
+      parse: (input: unknown) => {
+        assert.ok(typeof input === "string");
+        return input;
+      },
+      run: (command) =>
+        runCommand(
+          command,
+          command === process.execPath
+            ? ["-e", 'process.stdout.write("Recovered")']
+            : [],
+        ),
+      // Use JSON to check result fields independently of text formatting.
+      format: JSON.stringify,
+    }),
+  };
+  let calls = 0;
+  const reply = await runAgent(
+    "run a command",
+    async (messages) => {
+      calls += 1;
+      const last = messages.at(-1);
+      if (calls === 1) {
+        return {
+          type: "tool_call",
+          name: "run_command",
+          arguments: "/tinycc-missing-executable/run",
+        };
+      }
+      assert.ok(last?.role === "tool");
+      const result = JSON.parse(last.content) as {
+        kind: string;
+        stdout: string;
+      };
+      if (calls === 2) {
+        assert.equal(result.kind, "launch_error");
+        return {
+          type: "tool_call",
+          name: "run_command",
+          arguments: process.execPath,
+        };
+      }
+      assert.equal(calls, 3);
+      assert.equal(result.kind, "exited");
+      return result.stdout;
+    },
+    (call) => executeTool(call, tools),
+  );
+  assert.equal(reply, "Recovered");
+  assert.equal(calls, 3);
+});
