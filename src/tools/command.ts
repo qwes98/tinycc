@@ -32,6 +32,8 @@ type CommandOptions = {
  * Resource limits use SIGKILL so a direct child cannot ignore termination or exit as success.
  * Termination does not roll back side effects or manage descendant processes.
  * Child stdin is closed immediately; interactive commands are not supported.
+ * Child environments inherit host variables except ANTHROPIC_* credentials/configuration.
+ * This is not isolation: commands still have the host user's filesystem permissions.
  */
 export async function runCommand(
   command: string,
@@ -57,6 +59,13 @@ export async function runCommand(
           encoding: "utf8",
           maxBuffer: maxBufferBytes,
           killSignal: "SIGKILL",
+          // Avoid exposing API credentials through ordinary child environment inspection.
+          // Preserve PATH and other command settings; filesystem access is not restricted.
+          env: Object.fromEntries(
+            Object.entries(process.env).filter(
+              ([name]) => !name.toUpperCase().startsWith("ANTHROPIC_"),
+            ),
+          ),
         },
         (error, stdout, stderr) => {
           clearTimeout(timer);

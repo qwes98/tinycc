@@ -2,7 +2,7 @@
 
 A CLI coding agent harness.
 
-The current CLI uses a deterministic fake model for local development. The agent loop executes tool requests and returns results to the model until it produces a final response. File reading and command execution are supported. Command outcomes are formatted as text for the model.
+The CLI supports the Anthropic Messages API and a deterministic fake model for local development. The agent loop executes tool requests and returns results to the model until it produces a final response. File reading and command execution are supported. Command outcomes are formatted as text for the model.
 
 ## Run
 
@@ -31,6 +31,24 @@ exit
 
 `stats` reports attempted model calls, including failed calls. `help` and `stats` do not call the model.
 `fail` simulates a model connection failure, and `batch 3` sends `hello` to the model three times, sequentially. The session accepts another command after a failure.
+
+## Anthropic API
+
+Copy `.env.example` to `.env` in the repository root and set `ANTHROPIC_API_KEY` and `ANTHROPIC_MODEL` to your API key and an available Claude model ID. Alternatively, export those variables in your shell. Exported values take precedence over `.env`. The CLI loads `.env` only in Anthropic mode. The default session and all `--demo` commands use the fake model without network access.
+
+```sh
+./tinycc --model anthropic
+./tinycc --model anthropic --prompt "Read fixtures/project.txt and report its contents."
+./tinycc --model anthropic --prompt 'Run node with arguments ["-e", "process.stdout.write(String(6 * 7))"] and report the result.'
+```
+
+Anthropic mode executes model-requested tools in the current working directory. Commands run immediately with your OS permissions, without approval prompts or a sandbox. Use a disposable working directory. Child processes omit `ANTHROPIC_*` environment variables; filesystem access, including access to `.env`, remains unrestricted.
+
+Each input line starts an independent request history; only the model call counter persists across lines. In interactive and piped sessions, local commands such as `help`, `stats`, `batch`, and `exit` are handled by the CLI. `--prompt` sends one literal, nonempty request to the model, including text that matches a local command, and reports failures with a nonzero CLI exit code.
+
+The adapter uses Node's built-in `fetch`, with a 60-second limit per API call and no automatic network retries. It requests at most one tool per response, with a 4,096 output-token limit per call. Reaching that token limit reports a `max_tokens` failure. The original assistant content and tool-use ID are preserved when returning a tool result. Incomplete generations and unsupported responses fail before a tool is executed. See Anthropic's [tool-call lifecycle](https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls) and [parallel tool control](https://platform.claude.com/docs/en/agents-and-tools/tool-use/parallel-tool-use).
+
+The model is instructed to inspect affected state after command interruption before deciding what to retry. The host does not automatically roll back files, retry commands, or enforce that inspection. An API timeout also leaves prior tool side effects intact. Background command sessions, streaming, and descendant process management are not supported. The agent loop has no total call limit.
 
 ## Verify
 

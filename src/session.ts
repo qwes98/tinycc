@@ -7,13 +7,17 @@ type Outcome = "continue" | "exit" | "error";
  * Creates a command handler with its own model call counter.
  * @param model Async function that turns request history into text or one tool request.
  * @param write Receives each reply or status message; the caller controls where it goes.
- * @returns An execute function that shares this session's counter across calls.
+ * @returns Local command execution and literal prompt methods sharing one call counter.
  */
 export function createSession(model: Model, write: (text: string) => void) {
   let modelCalls = 0;
 
-  /** Runs one isolated request and displays final text; failures propagate to execute. */
+  /**
+   * Sends one literal prompt to the model and displays final text, without local command parsing.
+   * Resolves after display; empty prompts and model/tool failures reject to the caller.
+   */
   async function ask(prompt: string) {
+    if (prompt.trim() === "") throw new Error("Prompt must not be empty");
     const result = await runAgent(prompt, async (messages) => {
       // Count every attempted call, including later turns and rejected calls.
       modelCalls += 1;
@@ -36,7 +40,7 @@ export function createSession(model: Model, write: (text: string) => void) {
     if (line === "exit") return "exit";
     if (line === "help") {
       write(
-        "hello | read | inspect | command | command-error | stats | batch <1..20> | fail | exit\nOther input is sent to the fake model.",
+        "help | stats | batch <1..20> | exit\nOther input is sent to the model. Fake model commands: hello | read | inspect | command | command-error | fail.",
       );
       return "continue";
     }
@@ -71,5 +75,5 @@ export function createSession(model: Model, write: (text: string) => void) {
     }
   }
 
-  return { execute };
+  return { execute, ask };
 }

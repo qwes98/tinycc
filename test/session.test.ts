@@ -12,6 +12,32 @@ void test("hello prints the fixed readiness response", async () => {
   assert.deepEqual(output, ["tinycc ready"]);
 });
 
+void test("literal prompts bypass local commands and share the attempted call counter", async () => {
+  const prompts: string[] = [];
+  const output: string[] = [];
+  const session = createSession(
+    async (messages) => {
+      const first = messages[0];
+      assert.ok(first?.role === "user");
+      prompts.push(first.content);
+      return "Reply";
+    },
+    (text) => output.push(text),
+  );
+  for (const prompt of ["exit", "help", "batch 20", "  hello  "])
+    await session.ask(prompt);
+  await assert.rejects(session.ask("  "), /Prompt must not be empty/);
+  await session.execute("stats");
+  assert.deepEqual(prompts, ["exit", "help", "batch 20", "  hello  "]);
+  assert.deepEqual(output, [
+    "Reply",
+    "Reply",
+    "Reply",
+    "Reply",
+    "model_calls=4",
+  ]);
+});
+
 void test("nonzero command exits return to the model and the session continues", async () => {
   const output: string[] = [];
   const session = createSession(fakeModel, (text) => output.push(text));

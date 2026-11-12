@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import childProcess, { spawnSync, type ChildProcess } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,10 +8,12 @@ import test from "node:test";
 import {
   formatCommandResult,
   runCommand,
+  commandToolDefinition,
   type CommandResult,
 } from "../../src/tools/command.ts";
 import { defineTool, executeTool } from "../../src/tools.ts";
 import { runAgent } from "../../src/agent.ts";
+import { fileToolDefinition } from "../../src/tools/file.ts";
 
 // The Node test runner reports failures; registration Promises are intentionally not awaited.
 
@@ -136,6 +138,34 @@ void test("commands receive literal arguments, the current directory, and closed
   assert.ok(result.kind === "exited");
   assert.equal(result.exitCode, 0);
   assert.deepEqual(JSON.parse(result.stdout), [literal, process.cwd(), ""]);
+});
+
+void test("command environments omit Anthropic variables while retaining normal execution settings", async () => {
+  const names = [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "anthropic_test_secret",
+  ];
+  const original = names.map((name) => process.env[name]);
+  try {
+    for (const name of names) process.env[name] = "synthetic-secret";
+    const result = await runCommand(process.execPath, [
+      "-e",
+      'process.stdout.write(JSON.stringify({names: Object.keys(process.env).filter(name => name.toUpperCase().startsWith("ANTHROPIC_")), path: process.env.PATH}))',
+    ]);
+    assert.ok(result.kind === "exited");
+    assert.equal(result.exitCode, 0);
+    assert.deepEqual(JSON.parse(result.stdout), {
+      names: [],
+      path: process.env.PATH,
+    });
+    assert.equal(process.env.ANTHROPIC_API_KEY, "synthetic-secret");
+  } finally {
+    for (const [index, name] of names.entries()) {
+      if (original[index] === undefined) delete process.env[name];
+      else process.env[name] = original[index];
+    }
+  }
 });
 
 void test("launch failures resolve and invalid command arguments fail before execution", async () => {
@@ -322,6 +352,103 @@ void test("invalid host options and invalid executable values still reject", asy
   await assert.rejects(runCommand("bad\0executable", []), {
     code: "ERR_INVALID_ARG_VALUE",
   });
+});
+
+void test("after timeout the model inspects preserved files and completes only remaining work", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "tinycc-recovery-"));
+  const a = join(directory, "a.txt");
+  const b = join(directory, "b.txt");
+  const commands: string[][] = [];
+  const tools = {
+    read_file: defineTool(fileToolDefinition),
+    run_command: defineTool({
+      ...commandToolDefinition,
+      run: async ({ command, args }) => {
+        commands.push([...args]);
+        return runCommand(command, args, { timeoutMs: 1000 });
+      },
+    }),
+  };
+  const initialArgs = [
+    "-e",
+    // Append makes an unintended retry observable. Use synchronous writes so
+    // the captured marker proves both file changes preceded termination.
+    'const fs = require("node:fs"); fs.appendFileSync(process.argv[1], "done\\n"); fs.writeFileSync(process.argv[2], "partial"); fs.writeSync(1, "files changed\\n"); setInterval(() => {}, 1000);',
+    a,
+    b,
+  ];
+  let calls = 0;
+  try {
+    const reply = await runAgent(
+      "Complete both files",
+      async (messages) => {
+        calls += 1;
+        if (calls === 1) {
+          return {
+            type: "tool_call",
+            name: "run_command",
+            arguments: { command: process.execPath, args: initialArgs },
+          };
+        }
+        const last = messages.at(-1);
+        assert.ok(last?.role === "tool");
+        // This scripted model checks the information available for a recovery
+        // decision. It does not claim a real model must choose this sequence.
+        if (calls === 2) {
+          assert.equal(
+            last.content,
+            "Command timed out after 1000 ms. Partial work may have occurred; inspect state before retrying.\nfiles changed\n",
+          );
+          assert.equal(commands.length, 1);
+          return {
+            type: "tool_call",
+            name: "read_file",
+            arguments: { path: a },
+          };
+        }
+        if (calls === 3) {
+          assert.equal(last.content, "done\n");
+          return {
+            type: "tool_call",
+            name: "read_file",
+            arguments: { path: b },
+          };
+        }
+        if (calls === 4) {
+          assert.equal(last.content, "partial");
+          return {
+            type: "tool_call",
+            name: "run_command",
+            arguments: {
+              command: process.execPath,
+              args: [
+                "-e",
+                'require("node:fs").writeFileSync(process.argv[1], "complete");',
+                b,
+              ],
+            },
+          };
+        }
+        assert.equal(
+          calls,
+          5,
+          "Recovery must finish without repeating commands",
+        );
+        assert.equal(last.content, "");
+        return "Completed";
+      },
+      (call) => executeTool(call, tools),
+    );
+    assert.equal(reply, "Completed");
+    assert.equal(commands.length, 2);
+    assert.deepEqual(commands[0], initialArgs);
+    // Read disk independently of the model transcript to detect rollback,
+    // duplicate execution, or failure to apply the remaining change.
+    assert.equal(await readFile(a, "utf8"), "done\n");
+    assert.equal(await readFile(b, "utf8"), "complete");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 void test("the model receives a launch failure and can run a different command", async () => {

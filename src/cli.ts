@@ -1,21 +1,61 @@
 import { createInterface } from "node:readline";
+import { fileURLToPath } from "node:url";
+import { createAnthropicModel } from "./anthropic.ts";
 import { fakeModel } from "./model.ts";
 import { createSession } from "./session.ts";
 
-// Reuse one session so all input lines share the same call counter.
-// console.log supplies the newline; session messages do not need to include it.
-const session = createSession(fakeModel, (text) => console.log(text));
-// Node supplies the executable and script paths first; only the remaining items are CLI arguments.
-const args = process.argv.slice(2);
-
-if (args.length === 2 && args[0] === "--demo") {
-  // Demo mode runs one command and reports a command failure through the process exit code.
-  const outcome = await session.execute(args[1]!);
-  if (outcome === "error") process.exitCode = 1;
-} else if (args.length > 0) {
-  console.error("Usage: ./tinycc or ./tinycc --demo hello");
-  process.exitCode = 1;
-} else {
+/**
+ * Runs one prompt or sequential input lines; resolves after EOF, exit, or a one-shot reply.
+ * Configuration and unexpected failures reject to the entry point for exit-code reporting.
+ * Anthropic mode loads the repository's optional .env; exported environment values take precedence.
+ * Demo mode and the default session always use the fake model without loading credentials.
+ */
+async function main(): Promise<void> {
+  const args = process.argv.slice(2);
+  const demo = args.length === 2 && args[0] === "--demo";
+  const anthropic = args[0] === "--model" && args[1] === "anthropic";
+  const oneShot = anthropic && args.length === 4 && args[2] === "--prompt";
+  if (!(
+    args.length === 0 ||
+    demo ||
+    (anthropic && (args.length === 2 || oneShot))
+  )) {
+    throw new Error(
+      'Usage: ./tinycc [--demo <command> | --model anthropic [--prompt "<request>"]]',
+    );
+  }
+  if (anthropic) {
+    try {
+      process.loadEnvFile(fileURLToPath(new URL("../.env", import.meta.url)));
+    } catch (error) {
+      // A missing file is fine when credentials are exported by the parent shell.
+      if (!(
+        error instanceof Error &&
+        "code" in error &&
+        error.code === "ENOENT"
+      ))
+        throw error;
+    }
+  }
+  const model = anthropic
+    ? createAnthropicModel({
+        apiKey: process.env.ANTHROPIC_API_KEY ?? "",
+        model: process.env.ANTHROPIC_MODEL ?? "",
+      })
+    : fakeModel;
+  // Reuse one session so all input lines share the same call counter.
+  // console.log supplies the newline; session messages do not need to include it.
+  const session = createSession(model, (text) => console.log(text));
+  if (oneShot) {
+    // A one-shot prompt is user text, even when it matches a local command such as exit.
+    await session.ask(args[3]!);
+    return;
+  }
+  if (demo) {
+    const outcome = await session.execute(args[1]!);
+    if (outcome === "error") process.exitCode = 1;
+    return;
+  }
   // Show prompts only when both streams are terminals, keeping piped output free of prompts.
   const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
   const input = createInterface({
@@ -25,7 +65,9 @@ if (args.length === 2 && args[0] === "--demo") {
     prompt: "tinycc> ",
   });
   if (interactive) {
-    console.log("tinycc — fake model / type help for commands");
+    console.log(
+      `tinycc — ${anthropic ? "Anthropic" : "fake model"} / type help for commands`,
+    );
     input.prompt();
   }
   try {
@@ -33,11 +75,18 @@ if (args.length === 2 && args[0] === "--demo") {
     for await (const line of input) {
       const outcome = await session.execute(line);
       if (outcome === "exit") break;
-      // An "error" outcome still allows another command in this input loop.
       if (interactive) input.prompt();
     }
   } finally {
-    // Release the input interface on EOF, an exit request, or an unexpected exception.
     input.close();
   }
+}
+
+try {
+  await main();
+} catch (error) {
+  console.error(
+    `Error: ${error instanceof Error ? error.message : String(error)}`,
+  );
+  process.exitCode = 1;
 }
