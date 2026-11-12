@@ -67,6 +67,10 @@ npm run lint:fix      # Apply available safe lint fixes, then report remaining i
 
 Prettier owns code formatting. Oxlint checks correctness, including unhandled Promises and Promises used where synchronous values are expected. Type-aware linting uses `oxlint-tsgolint`; it supplements the separate TypeScript check. Fixture contents are excluded from automatic formatting to preserve their exact text.
 
+`npm install` (or `npm ci`) installs Git hooks through Husky. Before each commit, lint-staged applies safe Oxlint fixes to staged TypeScript files under `src/` and `test/`, then formats supported staged files with Prettier. Tasks run sequentially. When all tasks pass, their changes are staged automatically; if any task fails, lint-staged restores the original state and stops the commit. Unstaged edits in partially staged files are hidden during these tasks and restored afterward. Type-aware linting can still read unstaged edits in other files, so it does not validate an isolated commit snapshot. Inspect any errors and retry after resolving them. Run `npm run precommit` to run the same staged-file checks manually.
+
+Before each push, `npm run check` validates the working tree without modifying files. Commit any intended changes before pushing so these checks cover the code you send. GitHub Actions also runs `npm ci` and `npm run check` on pushes and pull requests, without API credentials. Local hooks can be bypassed, so CI provides an independent check.
+
 Node.js strips type annotations to run TypeScript. Type checking runs separately through `npm run typecheck`. The test glob is quoted so Node expands it instead of the shell, which also matches test files in subdirectories.
 
 `src/tools.ts` defines the shared tool contract, registers built-in tools, and dispatches requests. Each module under `src/tools/` keeps one tool's argument parsing, execution, and result formatting together. Tests mirror these paths under `test/`.

@@ -7,6 +7,8 @@
     "node": ">=24.12.0"
   },
   "scripts": {
+    "prepare": "husky",
+    "precommit": "lint-staged --concurrent false",
     "start": "node src/cli.ts",
     "test": "node --test \"test/**/*.test.ts\"",
     "typecheck": "tsc --noEmit",
@@ -16,8 +18,14 @@
     "lint:fix": "npm run lint -- --fix",
     "check": "npm run format:check && npm run lint && npm run typecheck && npm test"
   },
+  "lint-staged": {
+    "{src,test}/**/*.ts": "oxlint --deny-warnings --fix",
+    "*": "prettier --write --ignore-unknown"
+  },
   "devDependencies": {
     "@types/node": "^24.19.2",
+    "husky": "9.1.7",
+    "lint-staged": "17.6.0",
     "oxlint": "1.93.0",
     "oxlint-tsgolint": "7.0.2006",
     "prettier": "3.10.0",

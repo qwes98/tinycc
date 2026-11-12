@@ -1,0 +1,2 @@
+# Run fixes sequentially so Prettier formats the final lint output.
+npm run precommit

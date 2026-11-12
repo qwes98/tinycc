@@ -1,0 +1,2 @@
+# Validate without rewriting files after commits have been created.
+npm run check
