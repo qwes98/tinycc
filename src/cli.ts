@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { createAnthropicModel } from "./anthropic.ts";
 import { fakeModel } from "./model.ts";
 import { createSession } from "./session.ts";
+import { formatProgress } from "./progress.ts";
 
 /**
  * Runs one prompt or sequential input lines; resolves after EOF, exit, or a one-shot reply.
@@ -45,7 +46,12 @@ async function main(): Promise<void> {
     : fakeModel;
   // Reuse one session so all input lines share the same call counter.
   // console.log supplies the newline; session messages do not need to include it.
-  const session = createSession(model, (text) => console.log(text));
+  // Progress goes to stderr in both terminal and pipe mode; stdout keeps final replies.
+  const session = createSession(
+    model,
+    (text) => console.log(text),
+    (event) => console.error(formatProgress(event)),
+  );
   if (oneShot) {
     // A one-shot prompt is user text, even when it matches a local command such as exit.
     await session.ask(args[3]!);

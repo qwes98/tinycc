@@ -4,6 +4,23 @@ import { fakeModel, type Message } from "../src/model.ts";
 
 // The Node test runner reports failures; registration Promises are intentionally not awaited.
 
+void test("progress demo supplies intermediate text and a distinct final reply", async () => {
+  const messages: Message[] = [{ role: "user", content: "progress" }];
+  const call = await fakeModel(messages);
+  assert.deepEqual(call, {
+    type: "tool_call",
+    name: "read_file",
+    arguments: { path: "fixtures/project.txt" },
+    text: "I will read the project file.",
+  });
+  assert.ok(typeof call !== "string");
+  messages.push(
+    { role: "assistant", content: call },
+    { role: "tool", content: "tinycc fixture\n", isError: false },
+  );
+  assert.equal(await fakeModel(messages), "Inspection complete");
+});
+
 void test("command replies use the supplied tool result", async () => {
   for (const prompt of ["command", "command-error"]) {
     const messages: Message[] = [{ role: "user", content: prompt }];
@@ -21,7 +38,7 @@ void test("command replies use the supplied tool result", async () => {
     });
     messages.push(
       { role: "assistant", content: request },
-      { role: "tool", content: "Supplied result\n" },
+      { role: "tool", content: "Supplied result\n", isError: false },
     );
     assert.equal(await fakeModel(messages), "Supplied result\n");
   }
@@ -39,7 +56,7 @@ void test("the fake model requests files and uses the returned text", async () =
     assert.ok(typeof first !== "string");
     messages.push(
       { role: "assistant", content: first },
-      { role: "tool", content: "Actual file text\n" },
+      { role: "tool", content: "Actual file text\n", isError: false },
     );
     if (prompt === "read") {
       assert.equal(await fakeModel(messages), "Actual file text\n");
@@ -53,7 +70,7 @@ void test("the fake model requests files and uses the returned text", async () =
       assert.ok(typeof second !== "string");
       messages.push(
         { role: "assistant", content: second },
-        { role: "tool", content: "Notes\n" },
+        { role: "tool", content: "Notes\n", isError: false },
       );
       assert.equal(await fakeModel(messages), "Inspected two files");
     }

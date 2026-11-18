@@ -1,5 +1,5 @@
-import type { Message, Model } from "./model.ts";
-import type { ToolCall } from "./tools.ts";
+import type { Message, Model, ToolResponse } from "./model.ts";
+import type { ToolCall, ToolName } from "./tools.ts";
 
 type Options = {
   apiKey: string;
@@ -38,10 +38,7 @@ const toolSchemas = {
       additionalProperties: false,
     },
   },
-} satisfies Record<
-  ToolCall["name"],
-  { description: string; input_schema: unknown }
->;
+} satisfies Record<ToolName, { description: string; input_schema: unknown }>;
 
 /** Narrows untrusted JSON objects before API response fields are accessed. */
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -93,6 +90,7 @@ function toApiMessages(
             type: "tool_result",
             tool_use_id: context.id,
             content: result.content,
+            ...(result.isError ? { is_error: true } : {}),
           },
         ],
       },
@@ -106,7 +104,7 @@ function toApiMessages(
 
 /**
  * Creates a non-streaming Claude Messages API adapter; construction performs no network I/O.
- * Each call sends the supplied request history and resolves to text or one validated tool request.
+ * Resolves to final text or one validated tool request with user-facing text, never thinking blocks.
  * HTTP, transport, timeout, malformed response, and incomplete generation failures reject.
  * Requests are never retried automatically. A request timeout does not undo executed tools.
  * Metadata is keyed by issued call identity, not by session or history length, so separate
@@ -193,30 +191,10 @@ export function createAnthropicModel({
     }
     const content = data.content as Record<string, unknown>[];
     const uses = content.filter((block) => block.type === "tool_use");
-    if (data.stop_reason === "tool_use") {
-      // Validate the whole response before exposing any request to the executor.
-      if (uses.length !== 1)
-        throw new Error("Expected exactly one Anthropic tool request");
-      const use = uses[0]!;
-      if (
-        typeof use.id !== "string" ||
-        !use.id ||
-        typeof use.name !== "string" ||
-        !Object.hasOwn(toolSchemas, use.name) ||
-        !isRecord(use.input)
-      ) {
-        throw new Error("Invalid Anthropic tool request");
-      }
-      const call: ToolCall = {
-        type: "tool_call",
-        name: use.name as ToolCall["name"],
-        arguments: use.input,
-      };
-      // Preserve all assistant blocks, including text and any thinking signatures.
-      contexts.set(call, { id: use.id, content });
-      return call;
-    }
-    if (data.stop_reason !== "end_turn" || uses.length > 0) {
+    if (
+      data.stop_reason !== "tool_use" &&
+      (data.stop_reason !== "end_turn" || uses.length > 0)
+    ) {
       const reason =
         typeof data.stop_reason === "string" &&
         /^[a-z_]{1,64}$/.test(data.stop_reason)
@@ -227,12 +205,41 @@ export function createAnthropicModel({
       );
     }
     const texts = content.filter((block) => block.type === "text");
-    if (
-      texts.length === 0 ||
-      texts.some((block) => typeof block.text !== "string")
-    ) {
+    if (texts.some((block) => typeof block.text !== "string")) {
+      throw new Error(
+        data.stop_reason === "tool_use"
+          ? "Invalid Anthropic text block"
+          : "Anthropic response has no valid final text",
+      );
+    }
+    const text = texts.map((block) => block.text as string).join("");
+    if (data.stop_reason === "tool_use") {
+      // Validate the whole response before exposing any request to the executor.
+      if (uses.length !== 1)
+        throw new Error("Expected exactly one Anthropic tool request");
+      const use = uses[0]!;
+      if (
+        typeof use.id !== "string" ||
+        !use.id ||
+        typeof use.name !== "string" ||
+        !/^[a-zA-Z0-9_-]{1,64}$/.test(use.name) ||
+        !isRecord(use.input)
+      ) {
+        throw new Error("Invalid Anthropic tool request");
+      }
+      const call: ToolResponse = {
+        type: "tool_call",
+        name: use.name,
+        arguments: use.input,
+        ...(text === "" ? {} : { text }),
+      };
+      // Preserve all assistant blocks, including text and any thinking signatures.
+      contexts.set(call, { id: use.id, content });
+      return call;
+    }
+    if (texts.length === 0) {
       throw new Error("Anthropic response has no valid final text");
     }
-    return texts.map((block) => block.text as string).join("");
+    return text;
   };
 }

@@ -1,37 +1,53 @@
 import { fileToolDefinition } from "./tools/file.ts";
 import { commandToolDefinition } from "./tools/command.ts";
+import { ToolError, type ToolResult } from "./tools/result.ts";
+
+export type { ToolResult } from "./tools/result.ts";
 
 /** Keeps each tool's validated arguments and result connected inside defineTool. */
 export type ToolDefinition<Args, Result> = {
-  /** Validates external input, returning typed arguments or throwing before execution. */
+  /** Validates external input; throw ToolError for model-correctable input before execution. */
   parse: (input: unknown) => Args;
-  /** Resolves to the tool's result; execution failures reject the promise. */
+  /** Resolves to a completed outcome, or rejects with ToolError for an expected failure. */
   run: (args: Args) => Promise<Result>;
-  /** Converts a successful result to the text returned to the caller. */
+  /** Converts a completed outcome to text without trimming; defects reject the request. */
   format: (result: Result) => string;
+  /** Marks completed failure outcomes, such as nonzero exits. Omission means success. */
+  isError?: (result: Result) => boolean;
 };
 
 /** Common registry interface; argument and result types stay inside each tool. */
 export type Tool = {
-  /** Resolves to formatted text; validation, execution, and formatting failures reject. */
-  execute: (input: unknown) => Promise<string>;
+  /** Resolves to success/expected failure; unexpected exceptions reject to the caller. */
+  execute: (input: unknown) => Promise<ToolResult>;
 };
 
 export type ToolRegistry = Readonly<Record<string, Tool>>;
 
 /**
  * Wraps one definition as a registry entry without losing type checks between its stages.
- * Each call validates first, runs once, then formats only a successful result.
- * Failures propagate as promise rejections for the caller to report.
+ * Each call validates first, runs once, then formats its completed outcome.
+ * ToolError from validation/execution becomes a failed result for the model to act on.
+ * Unexpected exceptions and formatting/classification defects reject without automatic retries.
  */
 export function defineTool<Args, Result>(
   definition: ToolDefinition<Args, Result>,
 ): Tool {
   return {
     async execute(input) {
-      const args = definition.parse(input);
-      const result = await definition.run(args);
-      return definition.format(result);
+      let result: Result;
+      try {
+        const args = definition.parse(input);
+        result = await definition.run(args);
+      } catch (error) {
+        if (!(error instanceof ToolError)) throw error;
+        return { content: error.message, isError: true };
+      }
+      // Formatting and classification are host code, so their defects must stay visible.
+      return {
+        content: definition.format(result),
+        isError: definition.isError?.(result) ?? false,
+      };
     },
   };
 }
@@ -48,38 +64,43 @@ const defaultTools = {
 } satisfies ToolRegistry;
 
 /**
- * A model request for a built-in tool. Names follow the registry automatically.
- * Arguments remain untrusted until the selected tool validates them at runtime.
+ * A model request. Names and arguments remain untrusted until registry dispatch and parsing.
+ * An unknown name produces an error result so the model can select an advertised tool.
  */
 export type ToolCall = {
   type: "tool_call";
-  name: keyof typeof defaultTools;
+  name: string;
   arguments: unknown;
 };
 
+/** Built-in names advertised to models; derived from the executable registry. */
+export type ToolName = keyof typeof defaultTools;
+
 /**
- * Validates a parsed external request, selects an own registry entry, and resolves to text.
+ * Validates a parsed external request and resolves to a structured tool outcome.
  * The selected tool validates its arguments before running; this function does not parse JSON.
- * Unknown names reject with Error("Unknown tool: <name>"); all other failures also propagate.
- * Callers report failures. Injected registries can replace or add tools without filesystem access.
+ * Invalid requests and unknown names resolve with isError so the caller can return them to the model.
+ * Unexpected tool exceptions reject. Injected registries can replace or add tools without filesystem access.
  */
 export async function executeTool(
   call: unknown,
   tools: ToolRegistry = defaultTools,
-): Promise<string> {
+): Promise<ToolResult> {
   if (
     !isRecord(call) ||
     call.type !== "tool_call" ||
     typeof call.name !== "string" ||
     !Object.hasOwn(call, "arguments")
   ) {
-    throw new Error(
-      "Invalid tool call: expected { type: 'tool_call', name: string, arguments }",
-    );
+    return {
+      content:
+        "Invalid tool call: expected { type: 'tool_call', name: string, arguments }",
+      isError: true,
+    };
   }
   // Prototype properties such as toString are not registered tools.
   if (!Object.hasOwn(tools, call.name)) {
-    throw new Error(`Unknown tool: ${call.name}`);
+    return { content: `Unknown tool: ${call.name}`, isError: true };
   }
   return tools[call.name].execute(call.arguments);
 }

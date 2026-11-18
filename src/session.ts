@@ -1,5 +1,5 @@
 import type { Model } from "./model.ts";
-import { runAgent } from "./agent.ts";
+import { runAgent, type OnEvent } from "./agent.ts";
 
 type Outcome = "continue" | "exit" | "error";
 
@@ -7,9 +7,14 @@ type Outcome = "continue" | "exit" | "error";
  * Creates a command handler with its own model call counter.
  * @param model Async function that turns request history into text or one tool request.
  * @param write Receives each reply or status message; the caller controls where it goes.
+ * @param onEvent Receives progress separately; final replies go only to write.
  * @returns Local command execution and literal prompt methods sharing one call counter.
  */
-export function createSession(model: Model, write: (text: string) => void) {
+export function createSession(
+  model: Model,
+  write: (text: string) => void,
+  onEvent: OnEvent = () => {},
+) {
   let modelCalls = 0;
 
   /**
@@ -18,11 +23,16 @@ export function createSession(model: Model, write: (text: string) => void) {
    */
   async function ask(prompt: string) {
     if (prompt.trim() === "") throw new Error("Prompt must not be empty");
-    const result = await runAgent(prompt, async (messages) => {
-      // Count every attempted call, including later turns and rejected calls.
-      modelCalls += 1;
-      return model(messages);
-    });
+    const result = await runAgent(
+      prompt,
+      async (messages) => {
+        // Count every attempted call, including later turns and rejected calls.
+        modelCalls += 1;
+        return model(messages);
+      },
+      undefined,
+      onEvent,
+    );
     // Remove one display newline only after the model has consumed unmodified tool results.
     write(result.endsWith("\n") ? result.slice(0, -1) : result);
   }
@@ -40,7 +50,7 @@ export function createSession(model: Model, write: (text: string) => void) {
     if (line === "exit") return "exit";
     if (line === "help") {
       write(
-        "help | stats | batch <1..20> | exit\nOther input is sent to the model. Fake model commands: hello | read | inspect | command | command-error | fail.",
+        "help | stats | batch <1..20> | exit\nOther input is sent to the model. Fake model commands: hello | read | inspect | progress | recover | command | command-error | fail.",
       );
       return "continue";
     }

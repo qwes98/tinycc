@@ -1,5 +1,6 @@
 import { execFile, type ChildProcess } from "node:child_process";
 import type { ToolDefinition } from "../tools.ts";
+import { ToolError } from "./result.ts";
 
 /**
  * A process outcome with captured UTF-8 output. Only "exited" has a numeric exit code.
@@ -195,10 +196,13 @@ function parseCommandArguments(input: unknown): {
     !("args" in input) ||
     typeof input.command !== "string" ||
     input.command.length === 0 ||
+    input.command.includes("\0") ||
     !Array.isArray(input.args) ||
-    !input.args.every((arg: unknown) => typeof arg === "string")
+    !input.args.every(
+      (arg: unknown) => typeof arg === "string" && !arg.includes("\0"),
+    )
   ) {
-    throw new Error(
+    throw new ToolError(
       "Invalid tool arguments: expected { command: nonempty string, args: string[] }",
     );
   }
@@ -210,4 +214,5 @@ export const commandToolDefinition = {
   parse: parseCommandArguments,
   run: ({ command, args }) => runCommand(command, args),
   format: formatCommandResult,
+  isError: (result) => result.kind !== "exited" || result.exitCode !== 0,
 } satisfies ToolDefinition<{ command: string; args: string[] }, CommandResult>;

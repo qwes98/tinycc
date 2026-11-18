@@ -2,6 +2,25 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { fakeModel } from "../src/model.ts";
 import { createSession } from "../src/session.ts";
+import type { AgentEvent } from "../src/agent.ts";
+
+void test("session forwards progress separately and writes final text once", async () => {
+  const events: AgentEvent[] = [];
+  const output: string[] = [];
+  const session = createSession(
+    fakeModel,
+    (text) => output.push(text),
+    (event) => {
+      events.push(event);
+    },
+  );
+  assert.equal(await session.execute("progress"), "continue");
+  assert.deepEqual(
+    events.map((event) => event.type),
+    ["assistant_text", "tool_start", "tool_end"],
+  );
+  assert.deepEqual(output, ["Inspection complete"]);
+});
 
 // The Node test runner reports failures; registration Promises are intentionally not awaited.
 
@@ -104,7 +123,7 @@ void test("the session accepts another command after a model failure", async () 
   ]);
 });
 
-void test("later model failures and tool validation failures preserve counts and session recovery", async () => {
+void test("later model failures stop while tool validation failures allow a model response", async () => {
   for (const scenario of ["later-model", "invalid-tool"]) {
     const output: string[] = [];
     const session = createSession(
@@ -112,7 +131,13 @@ void test("later model failures and tool validation failures preserve counts and
         const first = messages[0];
         assert.ok(first?.role === "user");
         if (first.content === "hello") return "Recovered";
-        if (messages.length > 1) throw new Error("Later model failed");
+        if (messages.length > 1) {
+          const result = messages.at(-1);
+          assert.ok(result?.role === "tool");
+          assert.equal(result.isError, scenario === "invalid-tool");
+          if (scenario === "invalid-tool") return "A valid path is needed";
+          throw new Error("Later model failed");
+        }
         return {
           type: "tool_call",
           name: "read_file",
@@ -123,7 +148,10 @@ void test("later model failures and tool validation failures preserve counts and
       },
       (text) => output.push(text),
     );
-    assert.equal(await session.execute("read"), "error");
+    assert.equal(
+      await session.execute("read"),
+      scenario === "invalid-tool" ? "continue" : "error",
+    );
     await session.execute("stats");
     assert.equal(await session.execute("hello"), "continue");
     await session.execute("stats");
@@ -137,10 +165,10 @@ void test("later model failures and tool validation failures preserve counts and
             "model_calls=3",
           ]
         : [
-            "Error: Invalid tool arguments: expected { path: string }",
-            "model_calls=1",
-            "Recovered",
+            "A valid path is needed",
             "model_calls=2",
+            "Recovered",
+            "model_calls=3",
           ],
     );
   }

@@ -8,11 +8,91 @@ import { fileURLToPath } from "node:url";
 
 // The Node test runner reports failures; registration Promises are intentionally not awaited.
 
+void test("progress demo displays intermediate text, tool progress, and one final reply", () => {
+  const result = spawnSync(
+    process.execPath,
+    [
+      fileURLToPath(new URL("../src/cli.ts", import.meta.url)),
+      "--demo",
+      "progress",
+    ],
+    { encoding: "utf8", timeout: 10_000 },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "Inspection complete\n");
+  assert.equal(
+    result.stderr,
+    [
+      '[assistant] "I will read the project file."',
+      '[tool:start] read_file {"path":"fixtures/project.txt"}',
+      '[tool:end] read_file "tinycc fixture\\n"',
+      "",
+    ].join("\n"),
+  );
+});
+
+void test("a failed CLI tool reaches the model and can finish with a final response", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "tinycc-missing-file-"));
+  try {
+    // An empty cwd gives a deterministic missing fixture without altering repository files.
+    const result = spawnSync(
+      process.execPath,
+      [
+        fileURLToPath(new URL("../src/cli.ts", import.meta.url)),
+        "--demo",
+        "read",
+      ],
+      { cwd: directory, encoding: "utf8", timeout: 10_000 },
+    );
+    assert.equal(result.status, 0);
+    assert.match(result.stdout, /^ENOENT:.*fixtures\/project\.txt.*\n$/);
+    assert.deepEqual(result.stderr.trimEnd().split("\n"), [
+      '[tool:start] read_file {"path":"fixtures/project.txt"}',
+      `[tool:error] read_file ${JSON.stringify(result.stdout.slice(0, -1))}`,
+    ]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+void test("the recovery demo corrects a failed tool call in demo and piped sessions", () => {
+  const cli = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
+  for (const piped of [false, true]) {
+    const result = spawnSync(
+      process.execPath,
+      [cli, ...(piped ? [] : ["--demo", "recover"])],
+      {
+        input: piped ? "recover\nstats\nexit\n" : undefined,
+        cwd: fileURLToPath(new URL("..", import.meta.url)),
+        encoding: "utf8",
+        timeout: 10_000,
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(
+      result.stdout,
+      `Recovered: tinycc fixture\n${piped ? "model_calls=3\n" : ""}`,
+    );
+    assert.equal(
+      result.stderr,
+      [
+        '[assistant] "I will inspect the project file."',
+        '[tool:start] read_file {"path":42}',
+        '[tool:error] read_file "Invalid tool arguments: expected { path: string }"',
+        '[assistant] "I will correct the file path argument."',
+        '[tool:start] read_file {"path":"fixtures/project.txt"}',
+        '[tool:end] read_file "tinycc fixture\\n"',
+        "",
+      ].join("\n"),
+    );
+  }
+});
+
 void test("command demos print model replies and exit successfully for both process statuses", () => {
   const cli = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
-  for (const [demo, output] of [
-    ["command", "42\n"],
-    ["command-error", "Command failed: 7\n"],
+  for (const [demo, output, toolOutput] of [
+    ["command", "42\n", "42\n"],
+    ["command-error", "Command failed: 7\n", "Command failed: 7"],
   ]) {
     const result = spawnSync(process.execPath, [cli, "--demo", demo], {
       encoding: "utf8",
@@ -20,11 +100,18 @@ void test("command demos print model replies and exit successfully for both proc
     });
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout, output);
-    assert.equal(result.stderr, "");
+    assert.equal(
+      result.stderr,
+      [
+        `[tool:start] run_command ${JSON.stringify({ command: process.execPath, args: ["-e", demo === "command" ? 'process.stdout.write("42\\n")' : "process.exit(7)"] })}`,
+        `[tool:${demo === "command" ? "end" : "error"}] run_command ${JSON.stringify(toolOutput)}`,
+        "",
+      ].join("\n"),
+    );
   }
 });
 
-void test("inspect demo prints only the final response and exits successfully", () => {
+void test("inspect demo separates progress from the final response", () => {
   const cli = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
   const result = spawnSync(process.execPath, [cli, "--demo", "inspect"], {
     cwd: fileURLToPath(new URL("..", import.meta.url)),
@@ -33,7 +120,16 @@ void test("inspect demo prints only the final response and exits successfully", 
   });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, "Inspected two files\n");
-  assert.equal(result.stderr, "");
+  assert.equal(
+    result.stderr,
+    [
+      '[tool:start] read_file {"path":"fixtures/project.txt"}',
+      '[tool:end] read_file "tinycc fixture\\n"',
+      '[tool:start] read_file {"path":"fixtures/notes.txt"}',
+      '[tool:end] read_file "This is the second file.\\n"',
+      "",
+    ].join("\n"),
+  );
 });
 
 void test("the CLI produces the expected output for piped input", () => {
@@ -96,6 +192,7 @@ void test("Anthropic CLI completes tool requests in one-shot and piped sessions"
       assert.equal(body.model, "cli-test-model");
       if (body.messages.length === 1) {
         return Response.json({ stop_reason: "tool_use", content: [
+          { type: "text", text: "Reading the fixture." },
           { type: "tool_use", id: "cli-file", name: "read_file", input: { path: "fixtures/project.txt" } }
         ] });
       }
@@ -143,7 +240,15 @@ void test("Anthropic CLI completes tool requests in one-shot and piped sessions"
       continue;
     }
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stderr, "");
+    assert.equal(
+      result.stderr,
+      [
+        '[assistant] "Reading the fixture."',
+        '[tool:start] read_file {"path":"fixtures/project.txt"}',
+        '[tool:end] read_file "tinycc fixture\\n"',
+        "",
+      ].join("\n"),
+    );
     assert.equal(
       result.stdout,
       oneShot ? "tinycc fixture\n" : "tinycc fixture\nmodel_calls=2\n",

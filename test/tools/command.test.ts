@@ -104,6 +104,40 @@ void test("command failure text identifies the cause and warns about partial wor
   }
 });
 
+void test("completed command outcomes carry an explicit failure flag", async () => {
+  const outcomes: CommandResult[] = [
+    { kind: "exited", exitCode: 0, stdout: "", stderr: "warning\n" },
+    { kind: "exited", exitCode: 7, stdout: "partial\n", stderr: "" },
+    {
+      kind: "launch_error",
+      code: "ENOENT",
+      message: "missing",
+      stdout: "",
+      stderr: "",
+    },
+    { kind: "timeout", timeoutMs: 300, stdout: "partial\n", stderr: "" },
+    {
+      kind: "output_limit",
+      maxBufferBytes: 1024,
+      stdout: "partial",
+      stderr: "",
+    },
+    { kind: "signal", signal: "SIGKILL", stdout: "partial", stderr: "" },
+  ];
+  for (const [index, result] of outcomes.entries()) {
+    // The fixture order is the oracle: only the first outcome is successful,
+    // including when stdout is empty and stderr contains a warning.
+    const tool = defineTool({
+      ...commandToolDefinition,
+      run: async () => result,
+    });
+    assert.deepEqual(await tool.execute({ command: "unused", args: [] }), {
+      content: formatCommandResult(result),
+      isError: index !== 0,
+    });
+  }
+});
+
 void test("captured command results match direct process execution", async () => {
   // A synchronous subprocess provides an independent oracle for output and status.
   for (const exitCode of [0, 7]) {
@@ -168,7 +202,7 @@ void test("command environments omit Anthropic variables while retaining normal 
   }
 });
 
-void test("launch failures resolve and invalid command arguments fail before execution", async () => {
+void test("launch failures resolve and invalid command arguments become error results", async () => {
   const result = await runCommand("/tinycc-missing-executable/run", []);
   assert.equal(result.kind, "launch_error");
   assert.ok(result.kind === "launch_error");
@@ -181,26 +215,37 @@ void test("launch failures resolve and invalid command arguments fail before exe
     { command: "", args: [] },
     { command: process.execPath, args: [1] },
     { command: process.execPath },
+    { command: "bad\0executable", args: [] },
+    { command: process.execPath, args: ["bad\0argument"] },
   ]) {
-    await assert.rejects(
-      executeTool({ type: "tool_call", name: "run_command", arguments: args }),
-      /Invalid tool arguments/,
-    );
+    const failure = await executeTool({
+      type: "tool_call",
+      name: "run_command",
+      arguments: args,
+    });
+    assert.equal(failure.isError, true);
+    assert.match(failure.content, /Invalid tool arguments/);
   }
 });
 
-void test("command dispatch returns formatted process output", async () => {
-  assert.equal(
-    await executeTool({
+void test("command dispatch preserves process output and reports nonzero exits", async () => {
+  for (const exitCode of [0, 7]) {
+    const result = await executeTool({
       type: "tool_call",
       name: "run_command",
       arguments: {
         command: process.execPath,
-        args: ["-e", 'process.stdout.write("42\\n")'],
+        args: [
+          "-e",
+          `process.stdout.write("42\\n"); process.exitCode = ${exitCode}`,
+        ],
       },
-    }),
-    "42\n",
-  );
+    });
+    assert.deepEqual(result, {
+      content: exitCode === 0 ? "42\n" : "Command failed: 7\n42\n",
+      isError: exitCode !== 0,
+    });
+  }
 });
 
 void test(
@@ -395,6 +440,7 @@ void test("after timeout the model inspects preserved files and completes only r
         // This scripted model checks the information available for a recovery
         // decision. It does not claim a real model must choose this sequence.
         if (calls === 2) {
+          assert.equal(last.isError, true);
           assert.equal(
             last.content,
             "Command timed out after 1000 ms. Partial work may have occurred; inspect state before retrying.\nfiles changed\n",
@@ -407,6 +453,7 @@ void test("after timeout the model inspects preserved files and completes only r
           };
         }
         if (calls === 3) {
+          assert.equal(last.isError, false);
           assert.equal(last.content, "done\n");
           return {
             type: "tool_call",
@@ -415,6 +462,7 @@ void test("after timeout the model inspects preserved files and completes only r
           };
         }
         if (calls === 4) {
+          assert.equal(last.isError, false);
           assert.equal(last.content, "partial");
           return {
             type: "tool_call",
@@ -435,6 +483,7 @@ void test("after timeout the model inspects preserved files and completes only r
           "Recovery must finish without repeating commands",
         );
         assert.equal(last.content, "");
+        assert.equal(last.isError, false);
         return "Completed";
       },
       (call) => executeTool(call, tools),
@@ -467,6 +516,7 @@ void test("the model receives a launch failure and can run a different command",
         ),
       // Use JSON to check result fields independently of text formatting.
       format: JSON.stringify,
+      isError: commandToolDefinition.isError,
     }),
   };
   let calls = 0;
@@ -489,6 +539,7 @@ void test("the model receives a launch failure and can run a different command",
       };
       if (calls === 2) {
         assert.equal(result.kind, "launch_error");
+        assert.equal(last.isError, true);
         return {
           type: "tool_call",
           name: "run_command",
@@ -497,6 +548,7 @@ void test("the model receives a launch failure and can run a different command",
       }
       assert.equal(calls, 3);
       assert.equal(result.kind, "exited");
+      assert.equal(last.isError, false);
       return result.stdout;
     },
     (call) => executeTool(call, tools),
